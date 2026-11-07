@@ -1,0 +1,11 @@
+*.gguf
+*.engine
+*.onnx
+*.pt
+*.task
+*.wav
+src/output/
+src/json/
+.venv/
+.piper_venv/
+__pycache__/
