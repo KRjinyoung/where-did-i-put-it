@@ -1,6 +1,8 @@
 """음성으로 물건 위치를 묻고 음성으로 답하는 도우미.
 
 STT(Whisper) → Gemma(찾는 물건 고르기) → Gemma 멀티모달(기억 + 마지막 장면 사진) → TTS(Piper)
+vision_tracker.py가 저장한 item_memory.json과 last_frame_<class_id>.jpg를 읽기만 한다.
+
 실행 (~/vision-llm 에서, vision_tracker.py와 다른 터미널): python where-did-i-put-it/voice_assistant.py
 """
 
@@ -13,8 +15,6 @@ import time
 
 from llama_cpp import Llama
 from llama_cpp.llama_chat_format import Gemma4ChatHandler
-
-from item_memory import ITEM_NAMES, item_to_text
 
 
 GEMMA_MODEL_PATH = "src/models/Gemma4/google_gemma-4-E2B-it-Q4_K_M.gguf"
@@ -113,6 +113,25 @@ def load_items():
     return {item["name"]: item for item in memory["items"]}
 
 
+def ago_text(seconds):
+    if seconds < 60:
+        return "방금 전"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}분 전"
+    return f"{int(seconds // 3600)}시간 전"
+
+
+def item_to_text(item):
+    """물건 하나의 기억을 Gemma에게 줄 한 줄 문장으로. 예: '휴대폰: 2분 전 키보드 근처에서 마지막으로 봄.'"""
+    near = ", ".join(item["near"])
+
+    if item["status"] == "seen":
+        return f"{item['name']}: 지금 보고 있음" + (f" ({near} 근처)." if near else ".")
+
+    where = f" {near} 근처에서" if near else ""
+    return f"{item['name']}: {ago_text(time.time() - item['last_seen'])}{where} 마지막으로 봄."
+
+
 def image_to_data_url(path):
     with open(path, "rb") as file:
         return "data:image/jpeg;base64," + base64.b64encode(file.read()).decode("utf-8")
@@ -132,18 +151,21 @@ def ask_gemma(llm, system_prompt, user_content, max_tokens):
 
 
 def answer_question(llm, question):
-    # 1. 찾는 물건 고르기 (핸드폰/폰/휴대폰 같은 다른 표현도 Gemma가 맞춰줌)
-    names = ", ".join(ITEM_NAMES.values())
-    target = ask_gemma(llm, FIND_PROMPT, f"목록: {names}\n질문: {question}", 10).strip(" .")
+    items = load_items()
+
+    if not items:
+        return "아직 기억한 물건이 없어요."
+
+    # 1. 기억한 물건 중 찾는 물건 고르기 (핸드폰/폰 같은 다른 표현도 Gemma가 '휴대폰'으로 맞춰줌)
+    target = ask_gemma(llm, FIND_PROMPT, f"목록: {', '.join(items)}\n질문: {question}", 10).strip(" .")
     print(f"[찾는 물건] {target}")
 
-    # 기억에 없으면 Gemma에 묻지 않고 고정 답변 → 지어낸 위치를 말할 수 없음
-    item = load_items().get(target)
-
-    if item is None:
+    # 기억에 없으면 Gemma에 묻지 않고 고정 답변 → 위치를 지어낼 수 없음
+    if target not in items:
         return "그 물건은 아직 본 적이 없어요."
 
-    memory_text = item_to_text(item, time.time())
+    item = items[target]
+    memory_text = item_to_text(item)
     print(f"[기억] {memory_text}")
 
     # 2. 기억 문장 + 마지막 장면 사진을 같이 넣어 위치 설명
@@ -159,6 +181,9 @@ def answer_question(llm, question):
 def main():
     os.makedirs(os.path.dirname(AUDIO_FILE), exist_ok=True)
 
+    # Windows SSH 터미널은 한글을 UTF-8이 아닌 인코딩으로 보낼 수 있어서, 깨진 글자 때문에 죽지 않게
+    sys.stdin.reconfigure(errors="replace")
+
     llm = Llama(
         model_path=GEMMA_MODEL_PATH,
         chat_handler=Gemma4ChatHandler(clip_model_path=MMPROJ_PATH),
@@ -168,9 +193,6 @@ def main():
         n_ubatch=32,
         verbose=False,
     )
-
-    # Windows SSH 터미널은 한글을 UTF-8이 아닌 인코딩으로 보낼 수 있어서, 깨진 글자 때문에 죽지 않게
-    sys.stdin.reconfigure(errors="replace")
 
     while True:
         command = input("\nEnter: 말로 질문 / 글자 입력: 그대로 질문 / q: 종료 > ").strip()
