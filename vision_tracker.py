@@ -1,26 +1,27 @@
 """1인칭 카메라로 물건을 탐지해서 '마지막으로 본 장면'을 기억한다.
 
-- 물건이 2초 이상 계속 보이면 '봄', 3초 이상 안 보이면 '사라짐'
+- 찾을 물건(휴대폰, 마우스)이 보이면 '봄', 3초 이상 안 보이면 '사라짐'
 - 몸에 단 카메라라 고개만 돌려도 화면 좌표가 바뀐다.
   그래서 위치는 좌표 대신 '같이 보인 물건·가구'와 마지막 프레임 사진으로 기억한다.
 - 결과: where-did-i-put-it/output/ 안에 item_memory.json, last_frame_<class_id>.jpg
 
-실행 (~/vision-llm 에서): python where-did-i-put-it/vision_tracker.py
+실행 (이 폴더에서): .venv/bin/python vision_tracker.py
 """
 
 import json
 import math
 import os
 import time
-from collections import deque
 
 import cv2
 from ultralytics import YOLO
 
 
-YOLO_MODEL_PATH = "src/models/YOLO/yolo11n_int8.engine"
-# 결과는 이 파일 옆 output/ 폴더에 저장 (실행 위치와 상관없이)
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+# 모든 경로는 이 파일이 있는 폴더 기준 → 어디서 실행해도 이 폴더 안의 모델·결과만 사용
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+YOLO_MODEL_PATH = os.path.join(BASE_DIR, "src/models/YOLO/yolo11n_int8.engine")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 MEMORY_PATH = os.path.join(OUTPUT_DIR, "item_memory.json")
 
 # USB 카메라 (수업 때 쓰던 v4l2src 파이프라인)
@@ -35,46 +36,41 @@ CAMERA_PIPELINE = (
 
 # 찾을 물건: COCO class id → 한국어 이름
 ITEM_NAMES = {
-    24: "백팩",
-    25: "우산",
-    26: "핸드백",
-    39: "병",
-    41: "컵",
-    63: "노트북",
     64: "마우스",
-    65: "리모컨",
-    66: "키보드",
     67: "휴대폰",
-    73: "책",
-    76: "가위",
 }
 
-# 위치 설명용 가구: 같이 보이면 "책상 근처"
-PLACE_NAMES = {
+# 위치 설명용 물건·가구: 같이 보이면 "키보드 근처", "책상 근처"
+LANDMARK_NAMES = {
+    39: "병",
+    41: "컵",
     56: "의자",
     57: "소파",
     59: "침대",
     60: "책상",
     62: "TV",
+    63: "노트북",
+    66: "키보드",
+    73: "책",
 }
 
-SEEN_SECONDS = 2.0  # 이 시간 이상 계속 보이면 '봄' (한두 프레임 오탐 무시)
-LOST_SECONDS = 3.0  # 이 시간 이상 안 보이면 '사라짐'
+CONFIDENCE = 0.3    # 이보다 확신이 낮은 탐지는 무시 (1인칭 영상은 흐리고 각도가 심해서 휴대폰이 0.3~0.5로 잡히는 경우가 많음)
+LOST_SECONDS = 3.0  # 이 시간 이상 안 보이면 '사라짐' (잠깐 가려지거나 깜빡여도 유지)
 NEAR_COUNT = 3      # 근처 물건은 가까운 순으로 최대 3개
 
 
 def detect(yolo, frame):
-    """YOLO 탐지 → 물건 {class_id: 박스}(클래스당 1개), 가구 [(이름, 박스)]. 좌표는 0~1 정규화."""
+    """YOLO 탐지 → 찾을 물건 {class_id: 박스}(클래스당 1개), 주변 [(이름, 박스)]. 좌표는 0~1 정규화."""
     result = yolo.predict(
         source=frame,
-        conf=0.25,
+        conf=CONFIDENCE,
         iou=0.5,
-        classes=list(ITEM_NAMES) + list(PLACE_NAMES),
+        classes=list(ITEM_NAMES) + list(LANDMARK_NAMES),
         verbose=False,
     )[0]
 
     detections = {}
-    places = []
+    landmarks = []
 
     for box in result.boxes:  # confidence 내림차순이라 클래스별 첫 박스가 가장 확실한 것
         class_id = int(box.cls[0])
@@ -83,9 +79,9 @@ def detect(yolo, frame):
         if class_id in ITEM_NAMES:
             detections.setdefault(class_id, xyxy)
         else:
-            places.append((PLACE_NAMES[class_id], xyxy))
+            landmarks.append((LANDMARK_NAMES[class_id], xyxy))
 
-    return result, detections, places
+    return result, detections, landmarks
 
 
 def box_center(box):
@@ -97,43 +93,33 @@ def nearby_names(box, others):
     """같은 프레임에 보인 다른 물건·가구 이름을 가까운 순으로."""
     center = box_center(box)
     others = sorted(others, key=lambda other: math.dist(center, box_center(other[1])))
-    return [name for name, _ in others[:NEAR_COUNT]]
+    names = dict.fromkeys(name for name, _ in others)  # 같은 이름 중복 제거 (키보드 2개 → 키보드), 순서 유지
+    return list(names)[:NEAR_COUNT]
 
 
-def update_items(items, detections, places, now):
+def update_items(items, detections, landmarks, now):
     """한 프레임 탐지 결과로 물건 상태를 갱신하고, 새 이벤트 [(class_id, '봄'|'사라짐')]를 반환.
 
-    status: None(후보) --2초 계속 보임--> seen('봄') --3초 안 보임--> lost('사라짐') --2초 보임--> seen
-    후보가 3초 안 보이면 삭제 (잠깐 잘못 탐지된 물건은 기억하지 않음)
+    status: lost --보임--> seen('봄') --3초 안 보임--> lost('사라짐')
     """
-    # ponytail: 클래스당 1개만 추적 (컵 2개면 하나로 취급). 여러 개가 필요하면 yolo.track ID 사용.
+    # ponytail: 클래스당 1개만 추적 (휴대폰 2개면 하나로 취급). 여러 개가 필요하면 yolo.track ID 사용.
     events = []
-    everything = [(ITEM_NAMES[class_id], box) for class_id, box in detections.items()] + places
+    everything = [(ITEM_NAMES[class_id], box) for class_id, box in detections.items()] + landmarks
 
     for class_id, box in detections.items():
-        item = items.setdefault(class_id, {"name": ITEM_NAMES[class_id], "status": None, "since": now, "last_seen": now})
-
-        # 한동안 안 보이다 다시 보임 → 다시 2초 확인
-        # (lost는 2초 확정 전까지 lost 유지 → 잠깐 보였다 사라져도 '사라짐'이 중복으로 안 남음)
-        if now - item["last_seen"] > LOST_SECONDS:
-            item["since"] = now
+        item = items.setdefault(class_id, {"name": ITEM_NAMES[class_id], "status": "lost"})
 
         # 보일 때마다 최신 장면으로 덮어씀 → 사라지면 마지막으로 본 장면이 남음
         item["last_seen"] = now
         item["box"] = box
         item["near"] = nearby_names(box, [other for other in everything if other[0] != item["name"]])
 
-        if item["status"] != "seen" and now - item["since"] >= SEEN_SECONDS:
+        if item["status"] == "lost":
             item["status"] = "seen"
             events.append((class_id, "봄"))
 
-    for class_id, item in list(items.items()):
-        if item["status"] == "lost" or now - item["last_seen"] <= LOST_SECONDS:
-            continue
-
-        if item["status"] is None:
-            del items[class_id]
-        else:
+    for class_id, item in items.items():
+        if item["status"] == "seen" and now - item["last_seen"] > LOST_SECONDS:
             item["status"] = "lost"
             events.append((class_id, "사라짐"))
 
@@ -174,8 +160,7 @@ def main():
         return
 
     items = {}
-    last_frames = {}              # 물건별로 마지막으로 보인 프레임 ('사라짐' 때 이 장면을 저장)
-    event_log = deque(maxlen=20)  # 최근 이벤트 20개만 유지
+    last_frames = {}  # 물건별로 마지막으로 보인 프레임 ('사라짐' 때 이 장면을 저장)
 
     print("q : 종료")
 
@@ -190,26 +175,21 @@ def main():
             cap = cv2.VideoCapture(CAMERA_PIPELINE, cv2.CAP_GSTREAMER)
             continue
 
-        result, detections, places = detect(yolo, frame)
+        result, detections, landmarks = detect(yolo, frame)
 
         for class_id in detections:
             last_frames[class_id] = frame
 
         now = time.time()
-        events = update_items(items, detections, places, now)
+        events = update_items(items, detections, landmarks, now)
 
         for class_id, kind in events:
             item = items[class_id]
             print(f"[{kind}] {item['name']} - 근처: {', '.join(item['near']) or '없음'}")
-
-            event_log.append({"time": now, "name": item["name"], "event": kind, "near": item["near"]})
             save_frame(last_frames[class_id], class_id, item["box"])
 
         if events:
-            save_json(MEMORY_PATH, {
-                "items": [dict(item, class_id=class_id) for class_id, item in items.items() if item["status"]],
-                "events": list(event_log),
-            })
+            save_json(MEMORY_PATH, {"items": [dict(item, class_id=class_id) for class_id, item in items.items()]})
 
         cv2.imshow("where-did-i-put-it", result.plot())
 

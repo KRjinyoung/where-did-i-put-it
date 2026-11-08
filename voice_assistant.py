@@ -3,34 +3,38 @@
 STT(Whisper) → Gemma(찾는 물건 고르기) → Gemma 멀티모달(기억 + 마지막 장면 사진) → TTS(Piper)
 vision_tracker.py가 저장한 item_memory.json과 last_frame_<class_id>.jpg를 읽기만 한다.
 
-실행 (~/vision-llm 에서, vision_tracker.py와 다른 터미널): python where-did-i-put-it/voice_assistant.py
+실행 (이 폴더에서, vision_tracker.py와 다른 터미널): .venv/bin/python voice_assistant.py
 """
 
 import base64
 import json
 import os
+import re
 import subprocess
-import sys
 import time
 
 from llama_cpp import Llama
 from llama_cpp.llama_chat_format import Gemma4ChatHandler
 
 
-GEMMA_MODEL_PATH = "src/models/Gemma4/google_gemma-4-E2B-it-Q4_K_M.gguf"
-MMPROJ_PATH = "src/models/Gemma4/mmproj-google_gemma-4-E2B-it-f16.gguf"
+# 모든 경로는 이 파일이 있는 폴더 기준 → 어디서 실행해도 이 폴더 안의 모델·결과만 사용
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+GEMMA_MODEL_PATH = os.path.join(BASE_DIR, "src/models/Gemma4/google_gemma-4-E2B-it-Q4_K_M.gguf")
+MMPROJ_PATH = os.path.join(BASE_DIR, "src/models/Gemma4/mmproj-google_gemma-4-E2B-it-f16.gguf")
+
 # vision_tracker.py와 같은 output/ 폴더 (기억 JSON, 사진, 녹음·응답 음성)
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 MEMORY_PATH = os.path.join(OUTPUT_DIR, "item_memory.json")
 
 MIC_DEVICE = "plughw:CARD=Microphone,DEV=0"  # card 번호는 부팅마다 바뀌어서 이름으로 지정 (arecord -l 의 [ ] 앞 이름)
 AUDIO_FILE = os.path.join(OUTPUT_DIR, "input.wav")
-WHISPER_PATH = "whisper.cpp/build-cpu/bin/whisper-cli"
-WHISPER_MODEL = "whisper.cpp/models/ggml-base.bin"
+WHISPER_DIR = os.path.join(BASE_DIR, "whisper.cpp/build-cpu/bin")
+WHISPER_MODEL = os.path.join(BASE_DIR, "whisper.cpp/models/ggml-base.bin")
 RECORD_SECONDS = 5
 
-PIPER_PYTHON = ".piper_venv/bin/python"
-PIPER_MODEL = "src/models/Piper/ko_KR-kss-medium.onnx"
+PIPER_PYTHON = os.path.join(BASE_DIR, ".piper_venv/bin/python")
+PIPER_MODEL = os.path.join(BASE_DIR, "src/models/Piper/ko_KR-kss-medium.onnx")
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "response.wav")
 
 CONTEXT_WINDOW = 2048
@@ -58,7 +62,8 @@ Instruction:
 
 Constraint:
 기억 정보의 시간을 그대로 말하시오.
-사진에서 박스 주변에 확실히 보이는 물건이나 장소로 위치를 설명하시오.
+사진에서 박스 주변에 확실히 보이는 물건이나 장소(책상 위, 상자 옆, 손에 들고 있음 등)로 위치를 설명하시오.
+사진, 박스, 초록색이라는 말은 하지 마시오.
 확인되지 않는 내용은 추측하지 마시오.
 특수기호나 이모지를 쓰지 마시오.
 
@@ -84,7 +89,7 @@ def speech_to_text():
 
     result = subprocess.run(
         [
-            WHISPER_PATH,
+            os.path.join(WHISPER_DIR, "whisper-cli"),
             "-m", WHISPER_MODEL,
             "-f", AUDIO_FILE,
             "-l", "ko",
@@ -93,6 +98,8 @@ def speech_to_text():
         text=True,
         capture_output=True,
         check=True,
+        # whisper-cli는 같은 폴더의 libwhisper.so 등을 써야 함 (빌드한 원래 위치가 아니라 이 폴더 것으로)
+        env=dict(os.environ, LD_LIBRARY_PATH=WHISPER_DIR),
     )
 
     return result.stdout.strip()
@@ -154,9 +161,6 @@ def ask_gemma(llm, system_prompt, user_content, max_tokens):
 def answer_question(llm, question):
     items = load_items()
 
-    if not items:
-        return "아직 기억한 물건이 없어요."
-
     # 1. 기억한 물건 중 찾는 물건 고르기 (핸드폰/폰 같은 다른 표현도 Gemma가 '휴대폰'으로 맞춰줌)
     target = ask_gemma(llm, FIND_PROMPT, f"목록: {', '.join(items)}\n질문: {question}", 10).strip(" .")
     print(f"[찾는 물건] {target}")
@@ -169,12 +173,12 @@ def answer_question(llm, question):
     memory_text = item_to_text(item)
     print(f"[기억] {memory_text}")
 
-    # 2. 기억 문장 + 마지막 장면 사진을 같이 넣어 위치 설명
-    content = [{"type": "text", "text": f"Context:\n{memory_text}\n\nQuestion:\n{question}"}]
+    # 2. 기억 문장 + 마지막 장면 사진을 같이 넣어 위치 설명 (트래커가 사진을 JSON보다 먼저 저장하므로 항상 있음)
     frame_path = os.path.join(OUTPUT_DIR, f"last_frame_{item['class_id']}.jpg")
-
-    if os.path.exists(frame_path):
-        content.append({"type": "image_url", "image_url": {"url": image_to_data_url(frame_path)}})
+    content = [
+        {"type": "text", "text": f"Context:\n{memory_text}\n\nQuestion:\n{question}"},
+        {"type": "image_url", "image_url": {"url": image_to_data_url(frame_path)}},
+    ]
 
     return ask_gemma(llm, ANSWER_PROMPT, content, MAX_TOKENS)
 
@@ -182,18 +186,19 @@ def answer_question(llm, question):
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Windows SSH 터미널은 한글을 UTF-8이 아닌 인코딩으로 보낼 수 있어서, 깨진 글자 때문에 죽지 않게
-    sys.stdin.reconfigure(errors="replace")
-
     llm = Llama(
         model_path=GEMMA_MODEL_PATH,
-        chat_handler=Gemma4ChatHandler(clip_model_path=MMPROJ_PATH),
+        chat_handler=Gemma4ChatHandler(clip_model_path=MMPROJ_PATH, verbose=False),
         n_gpu_layers=-1,
         n_ctx=CONTEXT_WINDOW,
         n_batch=32,
         n_ubatch=32,
         verbose=False,
     )
+
+    # 첫 호출은 GPU 준비 때문에 30초 가까이 걸려서, 질문 받기 전에 한 번 미리 돌려둠
+    ask_gemma(llm, "한 단어로 답하시오.", "안녕", 1)
+    print("준비 완료")
 
     while True:
         command = input("\nEnter: 말로 질문 / 글자 입력: 그대로 질문 / q: 종료 > ").strip()
@@ -209,8 +214,8 @@ def main():
 
         print(f"[질문] {question}")
 
-        # 무음이면 Whisper가 [BLANK_AUDIO] 같은 토큰만 돌려줌
-        if not question or "BLANK_AUDIO" in question:
+        # 무음·잡음이면 Whisper가 [BLANK_AUDIO], [끝] 같은 괄호 토큰만 돌려줌 → 괄호를 빼고 남는 말이 없으면 다시 묻기
+        if not re.sub(r"\[.*?\]|\(.*?\)", "", question).strip():
             text_to_speech("잘 못 들었어요. 다시 말씀해 주세요.")
             continue
 
