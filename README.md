@@ -59,15 +59,25 @@ cp -a $S/whisper.cpp/models/ggml-base.bin whisper.cpp/models/
 cp -a $S/.venv $S/.piper_venv .
 ```
 
-실행 (이 폴더에서):
+실행 (이 폴더에서, 터미널 2개):
 
 ```bash
 # 터미널 1: 카메라 기록 (q 종료)
-.venv/bin/python vision_tracker.py
+source .venv/bin/activate
+python vision_tracker.py
 
-# 터미널 2: 질문 (Enter 후 5초 동안 말하기, 글자 입력도 가능, q 종료)
-.venv/bin/python voice_assistant.py
+# 터미널 2: 질문 ('준비 완료' 후 Enter → 5초 동안 말하기, 글자 입력도 가능, q 종료)
+source .venv/bin/activate
+python voice_assistant.py
 ```
+
+venv를 켜지 않고 `.venv/bin/python vision_tracker.py`처럼 바로 실행해도 된다.
+`.piper_venv`는 코드가 경로로 직접 실행하므로 따로 켤 필요 없음.
+
+시연 순서
+1. 터미널 1에서 휴대폰·마우스를 보면 `[봄]`, 고개를 돌려 3초 지나면 `[사라짐]`
+2. 터미널 2에서 Enter → "마우스 어디 뒀지?" → 위치를 음성으로 답변
+3. "지갑 어디 있어?" → "그 물건은 아직 본 적이 없어요" (기억에 없는 물건은 지어내지 않음)
 
 참고
 - 마이크는 `voice_assistant.py`의 `MIC_DEVICE`에 이름으로 지정 (`arecord -l`로 확인)
