@@ -1,4 +1,4 @@
-"""카메라로 물건을 탐지해서 위치와 이벤트(놓임/이동/사라짐)를 JSON에 기록.
+"""1인칭 카메라로 물건을 탐지해서 이벤트(봄/사라짐)와 마지막으로 본 장면을 기록.
 
 실행 (~/vision-llm 에서): python where-did-i-put-it/vision_tracker.py
 """
@@ -47,22 +47,25 @@ def save_frame(frame, class_id, box):
         replace_file(temp_path, path)
 
 
+def open_camera():
+    if sys.platform == "linux":
+        return cv2.VideoCapture(USB_PIPELINE, cv2.CAP_GSTREAMER)
+    return cv2.VideoCapture(0)  # 노트북(Windows) 내장 카메라
+
+
 def main():
     os.makedirs(os.path.dirname(MEMORY_PATH), exist_ok=True)
     os.makedirs(FRAME_DIR, exist_ok=True)
 
     yolo = YOLO(YOLO_MODEL_PATH)
-
-    if sys.platform == "linux":
-        cap = cv2.VideoCapture(USB_PIPELINE, cv2.CAP_GSTREAMER)
-    else:  # 노트북(Windows) 내장 카메라
-        cap = cv2.VideoCapture(0)
+    cap = open_camera()
 
     if not cap.isOpened():
         print("카메라를 열 수 없습니다.")
         return
 
     items = {}
+    last_frames = {}  # 물건별로 마지막으로 보인 프레임 ('사라짐' 때 이 장면을 저장)
     event_log = deque(maxlen=20)  # 최근 이벤트 20개만 유지
 
     print("q : 종료")
@@ -71,7 +74,12 @@ def main():
         ret, frame = cap.read()
 
         if not ret:
-            break
+            # 몸에 단 카메라라 USB가 잠깐 끊길 수 있음 → 종료하지 않고 다시 연결
+            print("카메라 프레임 없음, 다시 연결합니다.")
+            cap.release()
+            time.sleep(1)
+            cap = open_camera()
+            continue
 
         # 1. 물건 + 가구 탐지
         result = yolo.predict(
@@ -92,6 +100,7 @@ def main():
 
             if class_id in ITEM_NAMES:
                 detections.setdefault(class_id, xyxy)
+                last_frames[class_id] = frame
             else:
                 places.append((PLACE_NAMES[class_id], xyxy))
 
@@ -100,11 +109,11 @@ def main():
 
         # 4. 이벤트가 있을 때만 저장
         for event in events:
-            print(f"[{event['event']}] {event['name']} - {event['position']} {event['near'] or ''}")
+            print(f"[{event['event']}] {event['name']} - 근처: {', '.join(event['near']) or '없음'}")
             event_log.append(event)
 
-            if event["event"] != "사라짐":
-                save_frame(frame, event["class_id"], items[event["class_id"]]["box"])
+            # 봄: 지금 프레임, 사라짐: 마지막으로 보인 프레임
+            save_frame(last_frames[event["class_id"]], event["class_id"], items[event["class_id"]]["box"])
 
         if events:
             save_memory(MEMORY_PATH, items, event_log)
