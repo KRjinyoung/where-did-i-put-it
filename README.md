@@ -21,6 +21,40 @@ YOLO11 INT8 + MediaPipe로 물건 위치·이벤트를 기록하고, Whisper →
 
 마감: 2026-11-08 (일) 시연·발표 당일.
 
+## 파일
+
+| 파일 | 역할 |
+|---|---|
+| `item_memory.py` | 물건 상태 갱신·이벤트 감지·JSON 저장·자연어 변환 (카메라/모델 없는 순수 로직) |
+| `vision_tracker.py` | 카메라 → YOLO → `item_memory.update_items` → `src/json/item_memory.json`, `src/output/last_frame_<class>.jpg` |
+| `voice_assistant.py` | Enter → STT → 기억 JSON → Gemma → TTS |
+| `test_item_memory.py` | 이벤트 로직 확인 (`python test_item_memory.py` → `OK`) |
+
 ## 실행 방법
 
-(구현 후 작성: 의존성, 모델 경로, `arecord -l`로 `MIC_DEVICE` 확인, 두 터미널 실행 순서)
+수업 환경(`~/vision-llm`)에 이미 있는 것: `.venv`(ultralytics, llama-cpp-python), `src/models/YOLO/yolo11n_int8.engine`, `src/models/Gemma4/*.gguf`, `whisper.cpp` 빌드, `.piper_venv` + `src/models/Piper/ko_KR-kss-medium.onnx`.
+
+```bash
+cd ~/vision-llm
+git clone https://github.com/KRjinyoung/where-did-i-put-it.git
+source .venv/bin/activate
+
+# 마이크 번호 확인 후 voice_assistant.py의 MIC_DEVICE 수정
+arecord -l
+
+# 터미널 1
+python where-did-i-put-it/vision_tracker.py
+
+# 터미널 2
+python where-did-i-put-it/voice_assistant.py
+```
+
+카메라와 YOLO 모델은 자동 선택: Linux(Jetson)는 USB 카메라 `v4l2src` 파이프라인 + `yolo11n_int8.engine`, 그 외(노트북)는 0번 카메라 + `yolo11n.pt`.
+
+### 노트북에서 비전 부분만 실험 (Windows)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install opencv-python ultralytics
+.\.venv\Scripts\python.exe vision_tracker.py
+```
