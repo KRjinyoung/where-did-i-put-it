@@ -28,6 +28,32 @@ Jetson Orin 온디바이스 "어디 뒀지?" 음성 물건 찾기 도우미.
 
 두 프로그램은 `item_memory.json` 파일로만 연결된다 (트래커는 계속 기록, 도우미는 질문할 때만 읽음).
 
+## 주요 함수
+
+### vision_tracker.py
+
+| 함수 | 입력 → 출력 | 하는 일 |
+|---|---|---|
+| `detect(yolo, frame)` | 프레임 → 찾을 물건 `{class_id: 박스}`, 주변 물건 `[(이름, 박스)]` | YOLO로 휴대폰·마우스와 주변 물건 10종만 탐지 (확신도 0.3 이상). 찾을 물건은 클래스당 가장 확실한 박스 1개만. 좌표는 0~1 정규화 |
+| `nearby_names(box, others)` | 물건 박스, 같은 화면의 다른 물건 → `["키보드", ...]` | 박스 중심끼리 거리로 가까운 순 최대 3개, 같은 이름은 하나로. 1인칭이라 좌표 대신 "무엇 옆"으로 위치를 기억 |
+| `update_items(items, detections, landmarks, now)` | 이번 프레임 탐지 결과 → 새 이벤트 `[(class_id, "봄" 또는 "사라짐")]` | 보이면 `last_seen`·`box`·`near`를 최신으로 덮어쓰고, `lost`였으면 `seen`으로 바꾸며 '봄'. `seen`인데 3초 넘게 안 보이면 `lost`로 바꾸며 '사라짐'. 계속 덮어쓰므로 사라질 때 마지막 장면이 남음 |
+| `save_frame(frame, class_id, box)` | → `output/last_frame_<id>.jpg` | 물건에 초록 박스를 그려 저장. Gemma가 사진 속 어떤 물건인지 알 수 있게 표시 |
+| `save_json(path, data)` | → `output/item_memory.json` | `.tmp`에 쓰고 `os.replace`로 한 번에 교체. 도우미가 반쯤 쓰인 파일을 읽지 않음 |
+| `main()` | | 카메라 프레임마다 `detect` → 물건별 마지막 프레임 보관 → `update_items` → 이벤트가 있으면 사진·JSON 저장. 카메라가 끊기면 다시 연결, `q` 종료 |
+
+### voice_assistant.py
+
+| 함수 | 입력 → 출력 | 하는 일 |
+|---|---|---|
+| `speech_to_text()` | → `"마우스 어디 뒀지?"` | `arecord`로 5초 녹음(`pasuspender`로 PulseAudio 잠시 정지) → `whisper-cli -l ko` 받아쓰기 |
+| `text_to_speech(text)` | 답변 → 스피커 | Piper로 wav 생성 → `aplay` 재생 |
+| `load_items()` | → `{"마우스": {...}}` | 기억 JSON을 물건 이름으로 찾기 쉽게 변환 (파일 없으면 빈 dict) |
+| `item_to_text(item)` | 기억 → `"마우스: 5분 전 키보드 근처에서 마지막으로 봄."` | 마지막으로 본 시각을 "N분 전"으로 바꿔 Gemma에게 줄 한 줄 문장 생성 |
+| `image_to_data_url(path)` | jpg → base64 data URL | Gemma 멀티모달 입력 형식으로 변환 |
+| `ask_gemma(llm, system_prompt, user_content, max_tokens)` | 프롬프트 → 답변 문자열 | Gemma 호출 공통 함수 (`temperature=0.0`) |
+| `answer_question(llm, question)` | 질문 → 답변 | ① Gemma(텍스트)가 기억 목록 중 찾는 물건을 한 단어로 고름 ("핸드폰"도 "휴대폰"으로) ② 기억에 없으면 Gemma 없이 "본 적이 없어요" ③ 있으면 기억 문장 + 마지막 사진을 Gemma(멀티모달)에 넣어 위치 설명 |
+| `main()` | | Gemma + mmproj 로드 → 워밍업 1회(첫 질문 32초 → 4초) → Enter면 음성, 글자 입력이면 그대로 질문 → 괄호 토큰(`[끝]` 등)만 있으면 다시 묻기 → 답변 출력·재생, `q` 종료 |
+
 ## 실행 방법
 
 모든 경로는 이 폴더 기준이라, 아래 파일만 이 폴더 안에 있으면 어디서든 실행된다. 용량이 커서 git에는 없음(`.gitignore`).
