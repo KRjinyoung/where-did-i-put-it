@@ -19,18 +19,19 @@ from llama_cpp.llama_chat_format import Gemma4ChatHandler
 
 GEMMA_MODEL_PATH = "src/models/Gemma4/google_gemma-4-E2B-it-Q4_K_M.gguf"
 MMPROJ_PATH = "src/models/Gemma4/mmproj-google_gemma-4-E2B-it-f16.gguf"
-MEMORY_PATH = "src/json/item_memory.json"
-FRAME_DIR = "src/output"
+# vision_tracker.py와 같은 output/ 폴더 (기억 JSON, 사진, 녹음·응답 음성)
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+MEMORY_PATH = os.path.join(OUTPUT_DIR, "item_memory.json")
 
 MIC_DEVICE = "plughw:CARD=Microphone,DEV=0"  # card 번호는 부팅마다 바뀌어서 이름으로 지정 (arecord -l 의 [ ] 앞 이름)
-AUDIO_FILE = "src/audio/input.wav"
+AUDIO_FILE = os.path.join(OUTPUT_DIR, "input.wav")
 WHISPER_PATH = "whisper.cpp/build-cpu/bin/whisper-cli"
 WHISPER_MODEL = "whisper.cpp/models/ggml-base.bin"
 RECORD_SECONDS = 5
 
 PIPER_PYTHON = ".piper_venv/bin/python"
 PIPER_MODEL = "src/models/Piper/ko_KR-kss-medium.onnx"
-OUTPUT_FILE = "src/audio/response.wav"
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "response.wav")
 
 CONTEXT_WINDOW = 2048
 MAX_TOKENS = 100
@@ -170,7 +171,7 @@ def answer_question(llm, question):
 
     # 2. 기억 문장 + 마지막 장면 사진을 같이 넣어 위치 설명
     content = [{"type": "text", "text": f"Context:\n{memory_text}\n\nQuestion:\n{question}"}]
-    frame_path = os.path.join(FRAME_DIR, f"last_frame_{item['class_id']}.jpg")
+    frame_path = os.path.join(OUTPUT_DIR, f"last_frame_{item['class_id']}.jpg")
 
     if os.path.exists(frame_path):
         content.append({"type": "image_url", "image_url": {"url": image_to_data_url(frame_path)}})
@@ -179,7 +180,7 @@ def answer_question(llm, question):
 
 
 def main():
-    os.makedirs(os.path.dirname(AUDIO_FILE), exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # Windows SSH 터미널은 한글을 UTF-8이 아닌 인코딩으로 보낼 수 있어서, 깨진 글자 때문에 죽지 않게
     sys.stdin.reconfigure(errors="replace")

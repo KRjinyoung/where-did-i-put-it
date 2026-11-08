@@ -4,8 +4,7 @@
 *.pt
 *.task
 *.wav
-src/output/
-src/json/
+output/
 .venv/
 .piper_venv/
 __pycache__/

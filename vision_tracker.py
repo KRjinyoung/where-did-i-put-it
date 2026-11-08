@@ -3,7 +3,7 @@
 - 물건이 2초 이상 계속 보이면 '봄', 3초 이상 안 보이면 '사라짐'
 - 몸에 단 카메라라 고개만 돌려도 화면 좌표가 바뀐다.
   그래서 위치는 좌표 대신 '같이 보인 물건·가구'와 마지막 프레임 사진으로 기억한다.
-- 결과: src/json/item_memory.json, src/output/last_frame_<class_id>.jpg
+- 결과: where-did-i-put-it/output/ 안에 item_memory.json, last_frame_<class_id>.jpg
 
 실행 (~/vision-llm 에서): python where-did-i-put-it/vision_tracker.py
 """
@@ -19,8 +19,9 @@ from ultralytics import YOLO
 
 
 YOLO_MODEL_PATH = "src/models/YOLO/yolo11n_int8.engine"
-MEMORY_PATH = "src/json/item_memory.json"
-FRAME_DIR = "src/output"
+# 결과는 이 파일 옆 output/ 폴더에 저장 (실행 위치와 상관없이)
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+MEMORY_PATH = os.path.join(OUTPUT_DIR, "item_memory.json")
 
 # USB 카메라 (수업 때 쓰던 v4l2src 파이프라인)
 CAMERA_PIPELINE = (
@@ -157,14 +158,13 @@ def save_frame(frame, class_id, box):
     image = frame.copy()
     cv2.rectangle(image, (int(x1 * width), int(y1 * height)), (int(x2 * width), int(y2 * height)), (0, 255, 0), 3)
 
-    temp_path = os.path.join(FRAME_DIR, f"tmp_{class_id}.jpg")
+    temp_path = os.path.join(OUTPUT_DIR, f"tmp_{class_id}.jpg")
     cv2.imwrite(temp_path, image)
-    os.replace(temp_path, os.path.join(FRAME_DIR, f"last_frame_{class_id}.jpg"))
+    os.replace(temp_path, os.path.join(OUTPUT_DIR, f"last_frame_{class_id}.jpg"))
 
 
 def main():
-    os.makedirs(os.path.dirname(MEMORY_PATH), exist_ok=True)
-    os.makedirs(FRAME_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     yolo = YOLO(YOLO_MODEL_PATH)
     cap = cv2.VideoCapture(CAMERA_PIPELINE, cv2.CAP_GSTREAMER)

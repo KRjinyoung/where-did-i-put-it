@@ -8,8 +8,8 @@ Jetson Orin 온디바이스 "어디 뒀지?" 음성 물건 찾기 도우미.
 ## 파이프라인
 
 ```
-[vision_tracker.py]  카메라 → YOLO11n INT8 → 물건별 '봄/사라짐' + 같이 보인 물건·가구 → src/json/item_memory.json
-                                                                                 + src/output/last_frame_<id>.jpg
+[vision_tracker.py]  카메라 → YOLO11n INT8 → 물건별 '봄/사라짐' + 같이 보인 물건·가구 → output/item_memory.json
+                                                                                 + output/last_frame_<id>.jpg
 [voice_assistant.py] Enter → STT(Whisper) → Gemma(찾는 물건 고르기) → Gemma 멀티모달(기억 + 마지막 장면 사진) → TTS(Piper)
 ```
 
