@@ -1,9 +1,11 @@
-"""음성으로 물건 위치를 묻고 음성으로 답하는 도우미.
+"""Assistant that takes a spoken question about where an item is and answers by voice.
 
-STT(Whisper) → Gemma(찾는 물건 고르기) → Gemma 멀티모달(기억 + 마지막 장면 사진) → TTS(Piper)
-vision_tracker.py가 저장한 item_memory.json과 last_frame_<class_id>.jpg를 읽기만 한다.
+STT(Whisper) → Gemma(pick the target item) → Gemma multimodal(memory + last-scene photo) → TTS(Piper)
+Only reads item_memory.json and last_frame_<class_id>.jpg saved by vision_tracker.py.
 
-실행 (이 폴더에서, vision_tracker.py와 다른 터미널): .venv/bin/python voice_assistant.py
+Run (from this folder, in a different terminal from vision_tracker.py): .venv/bin/python voice_assistant.py
+
+Prompts and spoken text stay in Korean on purpose: Whisper listens with -l ko and Piper speaks with a Korean voice.
 """
 
 import base64
@@ -17,17 +19,17 @@ from llama_cpp import Llama
 from llama_cpp.llama_chat_format import Gemma4ChatHandler
 
 
-# 모든 경로는 이 파일이 있는 폴더 기준 → 어디서 실행해도 이 폴더 안의 모델·결과만 사용
+# All paths are relative to this file's folder → only this folder's models and outputs are used, wherever it runs from
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 GEMMA_MODEL_PATH = os.path.join(BASE_DIR, "src/models/Gemma4/google_gemma-4-E2B-it-Q4_K_M.gguf")
 MMPROJ_PATH = os.path.join(BASE_DIR, "src/models/Gemma4/mmproj-google_gemma-4-E2B-it-f16.gguf")
 
-# vision_tracker.py와 같은 output/ 폴더 (기억 JSON, 사진, 녹음·응답 음성)
+# Same output/ folder as vision_tracker.py (memory JSON, photos, recorded and response audio)
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 MEMORY_PATH = os.path.join(OUTPUT_DIR, "item_memory.json")
 
-MIC_DEVICE = "plughw:CARD=Microphone,DEV=0"  # card 번호는 부팅마다 바뀌어서 이름으로 지정 (arecord -l 의 [ ] 앞 이름)
+MIC_DEVICE = "plughw:CARD=Microphone,DEV=0"  # card number changes every boot, so select by name (the name before [ ] in arecord -l)
 AUDIO_FILE = os.path.join(OUTPUT_DIR, "input.wav")
 WHISPER_DIR = os.path.join(BASE_DIR, "whisper.cpp/build-cpu/bin")
 WHISPER_MODEL = os.path.join(BASE_DIR, "whisper.cpp/models/ggml-base.bin")
@@ -40,7 +42,10 @@ OUTPUT_FILE = os.path.join(OUTPUT_DIR, "response.wav")
 CONTEXT_WINDOW = 2048
 MAX_TOKENS = 100
 
-# 1단계: 질문에서 찾는 물건 고르기 (수업의 신호등 '한 단어' 프롬프트 방식)
+# Step 1: pick the target item from the question (the course's traffic-light 'one word' prompt pattern)
+# Instruction: pick which item in the list the user is looking for.
+# Constraint: answer with exactly one name from the list; if not in the list, answer 없음 (none); no extra explanation.
+# Output Format: one word.
 FIND_PROMPT = """
 Instruction:
 사용자의 질문에서 찾는 물건이 목록 중 무엇인지 고르시오.
@@ -54,7 +59,12 @@ Output Format:
 한 단어.
 """
 
-# 2단계: 기억 + 마지막 장면 사진으로 위치 설명
+# Step 2: describe the location from memory + last-scene photo
+# Instruction: tell where the item is from the memory and last photo; the green box is the item.
+# Constraint: state the memory's time as is; describe the location by things clearly visible around the box
+#             (on the desk, next to the box, in hand, etc.); don't mention photo/box/green; don't guess;
+#             no special symbols or emoji.
+# Output Format: at most two Korean sentences, natural to read aloud.
 ANSWER_PROMPT = """
 Instruction:
 기억 정보와 마지막으로 본 사진을 바탕으로 사용자가 찾는 물건이 어디 있는지 알려주시오.
@@ -98,7 +108,7 @@ def speech_to_text():
         text=True,
         capture_output=True,
         check=True,
-        # whisper-cli는 같은 폴더의 libwhisper.so 등을 써야 함 (빌드한 원래 위치가 아니라 이 폴더 것으로)
+        # whisper-cli must use libwhisper.so etc. from this folder (not from the original build location)
         env=dict(os.environ, LD_LIBRARY_PATH=WHISPER_DIR),
     )
 
@@ -111,7 +121,7 @@ def text_to_speech(text):
 
 
 def load_items():
-    """기억 JSON → {물건 이름: 상태}."""
+    """Memory JSON → {item name: state}."""
     if not os.path.exists(MEMORY_PATH):
         return {}
 
@@ -122,6 +132,7 @@ def load_items():
 
 
 def ago_text(seconds):
+    """Seconds → Korean 'just now' / 'N minutes ago' / 'N hours ago'."""
     if seconds < 60:
         return "방금 전"
     if seconds < 3600:
@@ -130,7 +141,7 @@ def ago_text(seconds):
 
 
 def item_to_text(item):
-    """물건 하나의 기억을 Gemma에게 줄 한 줄 문장으로. 예: '휴대폰: 2분 전 키보드 근처에서 마지막으로 봄.'"""
+    """One item's memory as a one-line sentence for Gemma. e.g. '휴대폰: 2분 전 키보드 근처에서 마지막으로 봄.' (Phone: last seen near the keyboard 2 minutes ago.)"""
     near = ", ".join(item["near"])
 
     if item["status"] == "seen":
@@ -161,19 +172,19 @@ def ask_gemma(llm, system_prompt, user_content, max_tokens):
 def answer_question(llm, question):
     items = load_items()
 
-    # 1. 기억한 물건 중 찾는 물건 고르기 (핸드폰/폰 같은 다른 표현도 Gemma가 '휴대폰'으로 맞춰줌)
+    # 1. Pick the target among remembered items (Gemma maps other wordings like 핸드폰/폰 to '휴대폰')
     target = ask_gemma(llm, FIND_PROMPT, f"목록: {', '.join(items)}\n질문: {question}", 10).strip(" .")
-    print(f"[찾는 물건] {target}")
+    print(f"[target] {target}")
 
-    # 기억에 없으면 Gemma에 묻지 않고 고정 답변 → 위치를 지어낼 수 없음
+    # Not in memory → fixed answer without asking Gemma, so it cannot make up a location
     if target not in items:
-        return "그 물건은 아직 본 적이 없어요."
+        return "그 물건은 아직 본 적이 없어요."  # "I haven't seen that item yet."
 
     item = items[target]
     memory_text = item_to_text(item)
-    print(f"[기억] {memory_text}")
+    print(f"[memory] {memory_text}")
 
-    # 2. 기억 문장 + 마지막 장면 사진을 같이 넣어 위치 설명 (트래커가 사진을 JSON보다 먼저 저장하므로 항상 있음)
+    # 2. Describe the location from the memory sentence + last-scene photo (the tracker saves the photo before the JSON, so it always exists)
     frame_path = os.path.join(OUTPUT_DIR, f"last_frame_{item['class_id']}.jpg")
     content = [
         {"type": "text", "text": f"Context:\n{memory_text}\n\nQuestion:\n{question}"},
@@ -196,32 +207,32 @@ def main():
         verbose=False,
     )
 
-    # 첫 호출은 GPU 준비 때문에 30초 가까이 걸려서, 질문 받기 전에 한 번 미리 돌려둠
+    # The first call takes almost 30 s for GPU warm-up, so run one call before taking questions
     ask_gemma(llm, "한 단어로 답하시오.", "안녕", 1)
-    print("준비 완료")
+    print("Ready")
 
     while True:
-        command = input("\nEnter: 말로 질문 / 글자 입력: 그대로 질문 / q: 종료 > ").strip()
+        command = input("\nEnter: ask by voice / type text: ask as typed / q: quit > ").strip()
 
         if command == "q":
             break
 
-        if command:  # 마이크가 안 될 때 대비: 입력한 글자를 그대로 질문으로
+        if command:  # fallback when the mic fails: use the typed text as the question
             question = command
         else:
-            print(f"{RECORD_SECONDS}초 동안 말씀해 주세요.")
+            print(f"Speak for {RECORD_SECONDS} seconds.")
             question = speech_to_text()
 
-        print(f"[질문] {question}")
+        print(f"[question] {question}")
 
-        # 무음·잡음이면 Whisper가 [BLANK_AUDIO], [끝] 같은 괄호 토큰만 돌려줌 → 괄호를 빼고 남는 말이 없으면 다시 묻기
+        # On silence/noise Whisper returns only bracket tokens like [BLANK_AUDIO] → if nothing remains after removing brackets, ask again
         if not re.sub(r"\[.*?\]|\(.*?\)", "", question).strip():
-            text_to_speech("잘 못 들었어요. 다시 말씀해 주세요.")
+            text_to_speech("잘 못 들었어요. 다시 말씀해 주세요.")  # "I didn't catch that. Please say it again."
             continue
 
         start = time.time()
         answer = answer_question(llm, question)
-        print(f"[답변] {answer}  ({time.time() - start:.1f}초)")
+        print(f"[answer] {answer}  ({time.time() - start:.1f}s)")
 
         text_to_speech(answer)
 

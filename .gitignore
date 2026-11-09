@@ -1,9 +1,9 @@
-# 실행 환경·모델 (용량이 커서 git에 안 올림, README 참고해서 이 폴더에 넣기)
+# Runtime environment and models (too large for git; put them in this folder per README)
 .venv/
 .piper_venv/
 src/models/
 whisper.cpp/
 
-# 실행 결과
+# Run outputs
 output/
 __pycache__/
